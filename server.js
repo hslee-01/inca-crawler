@@ -21,7 +21,13 @@ async function initBrowser() {
     if (!globalBrowser || !globalBrowser.connected) {
         globalBrowser = await puppeteer.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--window-size=1600,1000']
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null, // Docker 환경 대응
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage', // 메모리 부족 방지
+                '--window-size=1600,1000'
+            ]
         });
     }
     return globalBrowser;
