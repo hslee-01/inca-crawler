@@ -26,7 +26,11 @@ async function initBrowser() {
                 '--no-sandbox', 
                 '--disable-setuid-sandbox', 
                 '--disable-dev-shm-usage',
-                '--window-size=1600,1000'
+                '--disable-gpu', // GPU 가속 끄기 (메모리 절약)
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process', // 프로세스 하나로 실행 (메모리 절약)
+                '--window-size=1280,800'
             ]
         });
     }
