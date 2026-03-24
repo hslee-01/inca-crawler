@@ -4,13 +4,11 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@sparticuz/chromium": "^121.0.0",
     "express": "^5.0.0",
-    "puppeteer-core": "^22.0.0",
+    "puppeteer": "^22.0.0",
     "tesseract.js": "^5.0.0"
   }
 }

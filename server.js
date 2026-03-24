@@ -1,6 +1,5 @@
 import express from 'express';
-import puppeteer from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';
+import puppeteer from 'puppeteer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -18,18 +17,17 @@ let searchPage;
 let currentToken = "";
 let currentOrigin = "";
 
-// 버셀용 브라우저 초기화 로직
 async function initBrowser() {
     if (!globalBrowser || !globalBrowser.connected) {
-        const isLocal = !process.env.VERCEL; // 로컬 환경인지 버셀 환경인지 구분
-        
         globalBrowser = await puppeteer.launch({
-            args: isLocal ? ['--no-sandbox'] : chromium.args,
-            defaultViewport: chromium.defaultViewport,
-            executablePath: isLocal 
-                ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' // 로컬 크롬 경로 (사용자 환경에 맞게 수정 필요할 수 있음)
-                : await chromium.executablePath(),
-            headless: chromium.headless,
+            headless: true,
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage',
+                '--window-size=1600,1000'
+            ]
         });
     }
     return globalBrowser;
@@ -50,7 +48,7 @@ app.post('/api/search', async (req, res) => {
             document.getElementById('btnLogin').click();
         });
 
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
 
         const pageTarget = page.target();
         await page.evaluate(() => document.getElementById('menu0801')?.click());
@@ -68,7 +66,7 @@ app.post('/api/search', async (req, res) => {
                 typeSelect.value = type || 'F';
                 typeSelect.dispatchEvent(new Event('change', { bubbles: true }));
             }
-            await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, 2000));
 
             const compSelect = document.getElementById('cbo_company');
             if (compSelect) {
@@ -78,32 +76,43 @@ app.post('/api/search', async (req, res) => {
                     compSelect.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             }
+            await new Promise(r => setTimeout(r, 1000));
+
             document.getElementById('txt_product_name').value = pName;
             document.getElementById('btn_get_products').click();
         }, insuranceCompany, productName, insuranceType);
 
-        // 버셀 10초 제한 때문에 대기 시간을 약간 줄입니다.
-        await new Promise(r => setTimeout(r, 2500));
+        await new Promise(r => setTimeout(r, 4000));
 
         const allResults = await searchPage.evaluate(async () => {
             const results = [];
-            const rows = Array.from(document.querySelectorAll('#tbl_display_proucts .table-row'));
-            rows.forEach((row) => {
-                const title = row.querySelector('.col-product-name')?.innerText.trim();
-                const date = row.querySelector('.col-sales-date')?.innerText.trim();
-                const getBtnInfo = (sel) => {
-                    const b = row.querySelector(sel + ' button');
-                    return b ? {
-                        cc: b.getAttribute('data-company-cd'),
-                        fn: b.getAttribute('data-filename'),
-                        jm: b.getAttribute('data-job-month'),
-                        dt: b.getAttribute('data-doctype')
-                    } : null;
-                };
-                if (title) {
-                    results.push({ title, date, terms: getBtnInfo('.col-doc-1'), business: getBtnInfo('.col-doc-2'), summary: getBtnInfo('.col-doc-3') });
+            const pageButtons = Array.from(document.querySelectorAll('#pagination .num'));
+            const maxPage = pageButtons.length > 0 ? Math.max(...pageButtons.map(b => parseInt(b.innerText) || 1)) : 1;
+
+            for (let p = 1; p <= maxPage; p++) {
+                if (p > 1) {
+                    state.change_page(p);
+                    await new Promise(r => setTimeout(r, 2000));
                 }
-            });
+
+                const rows = Array.from(document.querySelectorAll('#tbl_display_proucts .table-row'));
+                rows.forEach((row) => {
+                    const title = row.querySelector('.col-product-name')?.innerText.trim();
+                    const date = row.querySelector('.col-sales-date')?.innerText.trim();
+                    const getBtnInfo = (sel) => {
+                        const b = row.querySelector(sel + ' button');
+                        return b ? {
+                            cc: b.getAttribute('data-company-cd'),
+                            fn: b.getAttribute('data-filename'),
+                            jm: b.getAttribute('data-job-month'),
+                            dt: b.getAttribute('data-doctype')
+                        } : null;
+                    };
+                    if (title) {
+                        results.push({ title, date, terms: getBtnInfo('.col-doc-1'), business: getBtnInfo('.col-doc-2'), summary: getBtnInfo('.col-doc-3') });
+                    }
+                });
+            }
             return results;
         });
 
@@ -130,9 +139,4 @@ app.get('/api/pdf', async (req, res) => {
     }
 });
 
-// 버셀 배포를 위해 익스프레스 앱 수출
-export default app;
-
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
-}
+app.listen(PORT, () => console.log(`🚀 서버 구동 중: http://localhost:${PORT}`));
