@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>보험 약관 자동 검색기</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        :root { --primary: #3498db; --bg: #f5f6fa; --text: #2f3640; }
+        body { font-family: -apple-system, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 15px; display: flex; flex-direction: column; align-items: center; }
+        .container { width: 100%; max-width: 600px; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); box-sizing: border-box; }
+        h1 { font-size: 1.4rem; text-align: center; color: var(--primary); margin-bottom: 20px; }
+        .upload-area { border: 2px dashed var(--primary); padding: 20px; text-align: center; border-radius: 8px; cursor: pointer; margin-bottom: 15px; }
+        #imageInput { display: none; }
+        
+        .form-group { margin-bottom: 12px; }
+        label { display: block; margin-bottom: 4px; font-weight: bold; font-size: 0.9rem; }
+        
+        /* 입력창 영역 개선 */
+        .input-wrapper { position: relative; display: flex; align-items: center; }
+        input, select { width: 100%; padding: 12px; padding-right: 40px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
+        select { padding-right: 12px; } /* 셀렉트박스는 우측 여백 기본값 */
+        
+        /* 삭제 버튼 스타일 */
+        .clear-btn { 
+            position: absolute; 
+            right: 10px; 
+            width: 24px; 
+            height: 24px; 
+            background: #eee; 
+            color: #888; 
+            border-radius: 50%; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            cursor: pointer; 
+            font-size: 16px; 
+            font-weight: bold;
+            user-select: none;
+        }
+        .clear-btn:hover { background: #ddd; }
+
+        button#searchBtn { width: 100%; padding: 15px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        button:disabled { opacity: 0.5; }
+        #status { margin-top: 15px; font-size: 0.85rem; text-align: center; color: #666; }
+        
+        .result-list { margin-top: 20px; }
+        .result-item { border: 1px solid #eee; padding: 15px; border-radius: 8px; margin-bottom: 15px; background: #fafafa; }
+        .result-title { font-weight: bold; margin-bottom: 5px; text-align: left; }
+        .result-date { font-size: 0.8rem; color: #888; margin-bottom: 12px; text-align: left; }
+        .doc-buttons { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+        .doc-btn { padding: 10px 5px; font-size: 0.75rem; text-align: center; text-decoration: none; border-radius: 4px; background: #fff; border: 1px solid #ddd; color: #333; font-weight: bold; }
+        .doc-btn.active { border-color: #2ecc71; color: #2ecc71; background: #f0fff4; }
+        canvas { display: none; } 
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>보험 약관 자동 검색</h1>
+        <div class="upload-area" onclick="document.getElementById('imageInput').click()">
+            <strong>📄 보험증권 이미지 등록</strong>
+            <p style="font-size: 0.8rem; color: #888;">갤러리 선택 또는 촬영</p>
+            <input type="file" id="imageInput" accept="image/*">
+        </div>
+
+        <div id="imagePreviewContainer" style="display:none; width:100%; margin-bottom:20px; border-radius:8px; overflow:hidden; border:1px solid #ddd;">
+            <p style="font-size:0.75rem; color:#888; margin:5px; text-align:center;">원본 이미지 (참고용)</p>
+            <img id="imagePreview" src="" style="width:100%; display:block;">
+        </div>
+
+        <div class="form-group">
+            <label>보험 구분</label>
+            <select id="insuranceType">
+                <option value="L">생명보험</option>
+                <option value="F" selected>손해보험</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>보험사</label>
+            <div class="input-wrapper">
+                <input type="text" id="insuranceCompany" placeholder="이미지에서 자동 추출">
+                <div class="clear-btn" onclick="document.getElementById('insuranceCompany').value=''">×</div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>상품명</label>
+            <div class="input-wrapper">
+                <input type="text" id="productName" placeholder="이미지에서 자동 추출">
+                <div class="clear-btn" onclick="document.getElementById('productName').value=''">×</div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>계약일/개정일 (참고용)</label>
+            <div class="input-wrapper">
+                <input type="text" id="contractDate" placeholder="자동 추출 대기 중...">
+                <div class="clear-btn" onclick="document.getElementById('contractDate').value=''">×</div>
+            </div>
+        </div>
+
+        <button id="searchBtn">약관 검색 시작</button>
+        <div id="status">이미지를 등록하면 정보를 분석합니다.</div>
+        <div id="results" class="result-list" style="display: none;"></div>
+        <canvas id="preprocessCanvas"></canvas>
+    </div>
+
+    <script>
+        const imageInput = document.getElementById('imageInput');
+        const insuranceInput = document.getElementById('insuranceCompany');
+        const productInput = document.getElementById('productName');
+        const typeInput = document.getElementById('insuranceType');
+        const dateInput = document.getElementById('contractDate');
+        const searchBtn = document.getElementById('searchBtn');
+        const statusDiv = document.getElementById('status');
+        const resultsDiv = document.getElementById('results');
+        const canvas = document.getElementById('preprocessCanvas');
+
+        const companyMap = [
+            { keywords: ['ABL', '에이비엘'], name: 'ABL생명', type: 'L' },
+            { keywords: ['삼성생명'], name: '삼성생명', type: 'L' },
+            { keywords: ['한화생명'], name: '한화생명', type: 'L' },
+            { keywords: ['교보'], name: '교보생명', type: 'L' },
+            { keywords: ['신한', 'SHINHAN'], name: '신한라이프', type: 'L' },
+            { keywords: ['동양', '수호천사', '우리WON'], name: '동양생명', type: 'L' },
+            { keywords: ['흥국생명'], name: '흥국생명', type: 'L' },
+            { keywords: ['라이나', 'LINA'], name: '라이나생명', type: 'L' },
+            { keywords: ['AIA'], name: 'AIA생명', type: 'L' },
+            { keywords: ['농협생명'], name: '농협생명', type: 'L' },
+            { keywords: ['미래에셋'], name: '미래에셋생명', type: 'L' },
+            { keywords: ['DB', '디비', '동부', '컨버전스'], name: 'DB손해보험', type: 'F' },
+            { keywords: ['메리츠', 'MERITZ'], name: '메리츠화재', type: 'F' },
+            { keywords: ['현대해상', 'HYUNDAI'], name: '현대해상화재', type: 'F' },
+            { keywords: ['삼성화재'], name: '삼성화재', type: 'F' },
+            { keywords: ['한화손해', '한화손보'], name: '한화손해보험', type: 'F' },
+            { keywords: ['KB', '케비'], name: 'KB손해보험', type: 'F' },
+            { keywords: ['흥국화재'], name: '흥국화재', type: 'F' },
+            { keywords: ['롯데', 'LOTTE'], name: '롯데손해보험', type: 'F' },
+            { keywords: ['MG', '엠지'], name: 'MG손해보험', type: 'F' },
+            { keywords: ['농협손해'], name: '농협손해보험', type: 'F' },
+            { keywords: ['하나손해'], name: '하나손해보험', type: 'F' },
+            { keywords: ['AXA', '악사'], name: 'AXA손해보험', type: 'F' },
+            { keywords: ['에이스', 'ACE'], name: '에이스손해', type: 'F' }
+        ];
+
+        function preprocessImage(imgElement) {
+            const ctx = canvas.getContext('2d');
+            canvas.width = imgElement.width;
+            canvas.height = imgElement.height;
+            ctx.filter = 'grayscale(100%) contrast(200%) brightness(100%)';
+            ctx.drawImage(imgElement, 0, 0);
+            return canvas.toDataURL('image/jpeg', 1.0);
+        }
+
+        imageInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                document.getElementById('imagePreview').src = event.target.result;
+                document.getElementById('imagePreviewContainer').style.display = 'block';
+            };
+            reader.readAsDataURL(file);
+
+            statusDiv.innerHTML = '⚙️ 이미지 분석 중...';
+            insuranceInput.value = '';
+            productInput.value = '';
+            dateInput.value = '';
+
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            img.onload = async () => {
+                const processedDataUrl = preprocessImage(img);
+                try {
+                    const { data: { text } } = await Tesseract.recognize(processedDataUrl, 'kor+eng');
+                    
+                    let matched = companyMap.find(c => c.keywords.some(k => text.toUpperCase().includes(k.toUpperCase())));
+                    if (matched) {
+                        insuranceInput.value = matched.name;
+                        typeInput.value = matched.type;
+                    } else {
+                        if (text.includes('생명')) {
+                            typeInput.value = 'L';
+                            const m = text.match(/([가-힣]+생명)/);
+                            if (m) insuranceInput.value = m[0];
+                        } else if (text.includes('화재') || text.includes('손해') || text.includes('해상')) {
+                            typeInput.value = 'F';
+                            const m = text.match(/([가-힣]+(?:화재|손해|해상))/);
+                            if (m) insuranceInput.value = m[0];
+                        }
+                    }
+
+                    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+                    const statusBarRegex = /(\d{1,2}:\d{2})|LTE|5G|4G|(?:\d{1,3}%)/i;
+                    let meaningfulLines = lines.filter(l => !statusBarRegex.test(l));
+                    
+                    if (meaningfulLines.length > 0) {
+                        let rawTitle = (meaningfulLines[0].length < 3 && meaningfulLines[1]) ? meaningfulLines[1] : meaningfulLines[0];
+                        let cleanTitle = rawTitle
+                            .replace(/^(\(무\)|무\)|무배당|\(무배당\)|[A-Z]\)|E\)|F\))/, '')
+                            .replace(/\s*[xX]$/, '')
+                            .replace(/\s*\(.*\).*$/, '')
+                            .replace(/[\|=0{}!@#$%^&*_+]/g, '')
+                            .trim();
+                        if (/[가-힣]/.test(cleanTitle) && cleanTitle.length >= 2) {
+                            productInput.value = cleanTitle;
+                        }
+                    }
+
+                    const dateMatch = text.match(/(\d{4})[.\-\/](\d{2})[.\-\/](\d{2})/);
+                    if (dateMatch) dateInput.value = `${dateMatch[1]}.${dateMatch[2]}.${dateMatch[3]}`;
+
+                    statusDiv.innerHTML = '✅ 분석 완료! 수정이 필요하면 직접 입력해 주세요.';
+                } catch (err) {
+                    statusDiv.innerHTML = '❌ 분석 실패';
+                }
+            };
+        });
+
+        searchBtn.addEventListener('click', async () => {
+            const insuranceCompany = insuranceInput.value;
+            const productName = productInput.value;
+            const insuranceType = typeInput.value;
+
+            if(!insuranceCompany || !productName) return alert('정보를 입력하세요.');
+
+            searchBtn.disabled = true;
+            statusDiv.innerHTML = '🔍 조회 중입니다...';
+            resultsDiv.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ insuranceCompany, productName, insuranceType })
+                });
+                const data = await res.json();
+
+                if (data.success && data.results.length > 0) {
+                    statusDiv.innerHTML = `✅ <b>${data.results.length}건</b> 발견!`;
+                    resultsDiv.style.display = 'block';
+
+                    const baseDateVal = dateInput.value.trim().replace(/\./g, '-');
+                    const baseDate = baseDateVal ? new Date(baseDateVal) : null;
+                    
+                    let targetIdx = -1;
+                    if (baseDate && !isNaN(baseDate)) {
+                        let minDiff = Infinity;
+                        data.results.forEach((item, idx) => {
+                            const salesDate = new Date(item.date.trim().replace(/\./g, '-'));
+                            if (!isNaN(salesDate) && salesDate >= baseDate) {
+                                const diff = salesDate.getTime() - baseDate.getTime();
+                                if (diff < minDiff) {
+                                    minDiff = diff;
+                                    targetIdx = idx;
+                                }
+                            }
+                        });
+                    }
+
+                    resultsDiv.innerHTML = data.results.map((item, index) => {
+                        const isHighlighted = (index === targetIdx);
+                        const highlightStyle = isHighlighted ? 'border: 3px solid #e74c3c !important; background: #fff0f0 !important;' : '';
+                        const badge = isHighlighted ? '<span style="background:#e74c3c; color:white; padding:3px 8px; border-radius:4px; font-size:0.75rem; margin-left:8px; font-weight:bold;">추천</span>' : '';
+                        const makeUrl = (d) => d ? `/api/pdf?cc=${d.cc}&fn=${encodeURIComponent(d.fn)}&jm=${d.jm}&dt=${d.dt}` : '#';
+
+                        return `
+                            <div class="result-item" style="${highlightStyle}">
+                                <div class="result-title">${item.title} ${badge}</div>
+                                <div class="result-date">판매일: <b>${item.date}</b></div>
+                                <div class="doc-buttons">
+                                    <a href="${makeUrl(item.terms)}" target="_blank" class="doc-btn active">약관보기</a>
+                                    <a href="${makeUrl(item.business)}" target="_blank" class="doc-btn active">방법서</a>
+                                    <a href="${makeUrl(item.summary)}" target="_blank" class="doc-btn active">요약서</a>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                } else {
+                    statusDiv.innerText = '검색 결과가 없습니다.';
+                }
+            } catch (e) {
+                statusDiv.innerText = '서버 연결 실패';
+            } finally {
+                searchBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

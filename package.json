@@ -1,0 +1,13 @@
+{
+  "name": "inca-crawler",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.0.0",
+    "puppeteer": "^24.0.0"
+  }
+}
