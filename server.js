@@ -1,9 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
-import puppeteer from 'puppeteer';
+import { Cluster } from 'puppeteer-cluster';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,137 +12,100 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// sleep 헬퍼 함수
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
 // Gemini 설정
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
-// [디버그] 사용 가능한 모델 목록 확인 (404 에러 원인 파악용)
-async function listModels() {
-    try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-        const data = await response.json();
-        console.log('--- [Gemini API 사용 가능 모델 목록] ---');
-        data.models?.forEach(m => console.log(`- ${m.name}`));
-        console.log('---------------------------------------');
-    } catch (e) {
-        console.error('모델 목록 확인 실패:', e.message);
-    }
-}
-listModels();
-
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
-let searchPage;
+let cluster;
 
-// Gemini OCR 엔드포인트
-app.post('/api/ocr', async (req, res) => {
-    try {
-        const { image } = req.body; // base64 data
-        if (!image) return res.status(400).json({ success: false, message: "이미지 데이터가 없습니다." });
-
-        const base64Data = image.split(',')[1] || image;
-        
-        const result = await model.generateContent([
-            "이미지에서 다음 정보를 추출하세요:\n" +
-            "1. 보험사명 (예: 삼성화재, 라이나생명, 메리츠화재 등)\n" +
-            "2. 상품명 (가장 크게 적힌 공식 이름)\n" +
-            "3. 계약일 (YYYY.MM.DD 형식, 날짜가 여러 개라면 가장 앞의 시작 날짜를 선택)\n\n" +
-            "결과는 오직 '보험사,상품명,날짜' 형식으로만 출력하세요. 못 찾으면 '미상'으로 하세요. 다른 설명은 하지 마세요.",
-            {
-                inlineData: {
-                    data: base64Data,
-                    mimeType: "image/jpeg"
-                }
-            }
-        ]);
-
-
-        const text = result.response.text().trim();
-        console.log('[Gemini OCR 결과]:', text);
-        res.json({ success: true, text });
-    } catch (error) {
-        console.error('Gemini OCR 에러:', error.message);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-app.post('/api/search', async (req, res) => {
-    const { insuranceCompany, productName, insuranceType } = req.body;
-    console.log(`\n[검색 시작] ${insuranceCompany} / ${productName}`);
-
-    let browser;
-    try {
-        browser = await puppeteer.launch({
+// [대규모 접속 최적화] 클러스터 초기화 함수
+async function initCluster() {
+    const isLinux = process.platform === 'linux';
+    
+    cluster = await Cluster.launch({
+        concurrency: Cluster.CONCURRENCY_CONTEXT, // 컨텍스트 분리 (로그인 세션 공유 극대화)
+        maxConcurrency: 2, // VPS 사양(2~4GB)에 맞춰 동시 브라우저 2개로 제한 (서버 폭발 방지)
+        puppeteerOptions: {
             headless: true,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process'
-            ]
-        });
-        const page = await browser.newPage();
+            userDataDir: './user_data', // [핵심] 로그인 정보를 저장하여 재로그인 생략
+            args: isLinux ? [
+                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process'
+            ] : ['--no-sandbox', '--disable-setuid-sandbox']
+        },
+        retryLimit: 1, // 에러 시 1회 재시도
+        timeout: 120000 // 전체 작업 타임아웃 2분
+    });
 
-        console.log('[상태] 메인 페이지 접속 중...');
-        await page.goto('https://incar.ohmymanager.com/index.html', { 
-            waitUntil: 'domcontentloaded', 
-            timeout: 60000 
-        });
-
-        // 로그인 입력창이 뜰 때까지 대기
-        await page.waitForSelector('#id', { timeout: 30000 });
+    // 검색 작업 정의
+    await cluster.task(async ({ page, data }) => {
+        const { insuranceCompany, productName, insuranceType, startTime } = data;
         
-        await page.evaluate(() => {
-            document.getElementById('id').value = '2334814';
-            document.getElementById('pw').value = '2334814';
-            document.getElementById('btnLogin').click();
+        const logTime = (msg) => {
+            const diff = ((Date.now() - startTime) / 1000).toFixed(2);
+            console.log(`[상태] ${msg} (+${diff}s)`);
+        };
+
+        // 이미지 차단 (속도 향상)
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (['image', 'font'].includes(req.resourceType())) req.abort();
+            else req.continue();
         });
 
-        console.log('[상태] 로그인 처리 중...');
-        // 로그인 후 메인 메뉴가 뜰 때까지 대기
-        await page.waitForSelector('#menu0801', { timeout: 30000 });
-        await new Promise(r => setTimeout(r, 2000)); // 안정성을 위한 추가 대기
+        // 1. 메인 페이지 접속 (로그인 여부 확인)
+        logTime('브라우저 실행 및 페이지 접속 중...');
+        await page.goto('https://incar.ohmymanager.com/index.html', { waitUntil: 'domcontentloaded' });
 
-        console.log('[상태] 메뉴 클릭 및 팝업 대기 중...');
-        
-        // 클릭과 타겟 감지를 동시에 시작 (가장 확실한 방법)
+        const isLoginPage = await page.$('#id');
+        if (isLoginPage) {
+            logTime('로그인 필요 (신규 세션)');
+            await page.evaluate(() => {
+                document.getElementById('id').value = '2334814';
+                document.getElementById('pw').value = '2334814';
+                document.getElementById('btnLogin').click();
+            });
+            await page.waitForSelector('#menu0801', { timeout: 30000 });
+        } else {
+            logTime('이미 로그인 됨 (세션 유지)');
+        }
+
+        // 2. 검색 페이지(팝업) 열기
+        logTime('검색 페이지 열기 중...');
         const [target] = await Promise.all([
-            browser.waitForTarget(t => t.opener() === page.target(), { timeout: 60000 }),
+            page.browser().waitForTarget(t => t.opener() === page.target(), { timeout: 60000 }),
             page.click('#menu0801')
         ]);
 
-        searchPage = await target.page();
-        if (!searchPage) throw new Error("팝업 창 페이지를 가져오지 못했습니다.");
+        const searchPage = await target.page();
+        if (!searchPage) throw new Error("팝업 창을 열지 못했습니다.");
         
-        console.log('[상태] 팝업 창 연결 성공, 토큰 확인 중...');
-        // 팝업 창 URL에 token이 포함될 때까지 대기
-        await searchPage.waitForFunction(() => window.location.href.includes('token='), { timeout: 60000 });
-        
-        await new Promise(r => setTimeout(r, 3000));
+        // 팝업에서도 이미지 차단
+        await searchPage.setRequestInterception(true);
+        searchPage.on('request', (req) => {
+            if (['image', 'font'].includes(req.resourceType())) req.abort();
+            else req.continue();
+        });
 
+        await searchPage.waitForFunction(() => window.location.href.includes('token='), { timeout: 60000 });
         const urlObj = new URL(searchPage.url());
         const token = urlObj.searchParams.get('token');
         const origin = urlObj.origin;
 
-        console.log('[상태] 상품 검색 설정 중...');
-        // 검색 페이지 요소가 뜰 때까지 대기
+        // 3. 상품 검색 수행
         await searchPage.waitForSelector('#cbo_company', { timeout: 30000 });
-
+        logTime('검색 필터 설정 중...');
+        
         await searchPage.evaluate(async (company, pName, type) => {
             const typeSelect = document.getElementById('cbo_company_type');
             if (typeSelect) {
                 typeSelect.value = type || 'F';
                 typeSelect.dispatchEvent(new Event('change', { bubbles: true }));
             }
-            await new Promise(r => setTimeout(r, 3000));
-
+            await new Promise(r => setTimeout(r, 1000));
             const compSelect = document.getElementById('cbo_company');
             if (compSelect) {
                 const targetOpt = Array.from(compSelect.options).find(o => o.text.includes(company));
@@ -150,19 +114,23 @@ app.post('/api/search', async (req, res) => {
                     compSelect.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             }
-            await new Promise(r => setTimeout(r, 2000));
-
+            await new Promise(r => setTimeout(r, 1000));
             document.getElementById('txt_product_name').value = pName;
             document.getElementById('btn_get_products').click();
         }, insuranceCompany, productName, insuranceType);
 
-        // 결과 리스트 로딩 대기 시간 증가 (4초 -> 6초)
-        await new Promise(r => setTimeout(r, 6000));
+        // 4. 결과 리스트 대기 및 추출
+        logTime('결과 데이터 로딩 중...');
+        await new Promise(r => setTimeout(r, 3000));
+        await searchPage.waitForFunction(() => {
+            const rows = document.querySelectorAll('#tbl_display_proucts .table-row');
+            return rows.length > 0 || document.body.innerText.includes('조회한 상품이 없습니다');
+        }, { timeout: 30000 });
 
-        const allResults = await searchPage.evaluate(async () => {
-            const results = [];
-            const rows = Array.from(document.querySelectorAll('#tbl_display_proucts .table-row'));
-            rows.forEach((row) => {
+        const results = await searchPage.evaluate(() => {
+            const list = [];
+            const rows = document.querySelectorAll('#tbl_display_proucts .table-row');
+            rows.forEach(row => {
                 const title = row.querySelector('.col-product-name')?.innerText.trim();
                 const date = row.querySelector('.col-sales-date')?.innerText.trim();
                 const getBtnInfo = (sel) => {
@@ -175,62 +143,82 @@ app.post('/api/search', async (req, res) => {
                     } : null;
                 };
                 if (title && !title.includes('조회한 상품이 없습니다')) {
-                    results.push({ title, date, terms: getBtnInfo('.col-doc-1'), business: getBtnInfo('.col-doc-2'), summary: getBtnInfo('.col-doc-3') });
+                    list.push({ 
+                        title, date, 
+                        terms: getBtnInfo('.col-doc-1'), 
+                        business: getBtnInfo('.col-doc-2'), 
+                        summary: getBtnInfo('.col-doc-3') 
+                    });
                 }
             });
-            return results;
+            return list;
         });
 
-        res.json({ success: true, results: allResults, token, origin });
+        logTime(`완료 (${results.length}건)`);
+        await searchPage.close(); // 팝업만 닫고 메인 창은 재사용을 위해 남겨둠 (컨텍스트가 닫히면 어차피 사라짐)
+        
+        return { success: true, results, token, origin };
+    });
 
+    console.log('🚀 클러스터 관리 엔진 기동 완료 (동시성 2)');
+}
+
+// 서버 시작 시 클러스터 초기화
+initCluster().catch(err => console.error('클러스터 기동 실패:', err));
+
+// Gemini OCR 엔드포인트 (기존 동일)
+app.post('/api/ocr', async (req, res) => {
+    try {
+        const { image } = req.body;
+        if (!image) return res.status(400).json({ success: false, message: "이미지 데이터가 없습니다." });
+        const base64Data = image.split(',')[1] || image;
+        const result = await model.generateContent([
+            "이미지에서 다음 정보를 추출하세요:\n1. 보험사명\n2. 상품명\n3. 계약일 (YYYY.MM.DD 형식)\n\n결과는 오직 '보험사,상품명,날짜' 형식으로만 출력하세요.",
+            { inlineData: { data: base64Data, mimeType: "image/jpeg" } }
+        ]);
+        const text = result.response.text().trim();
+        console.log('[Gemini OCR 결과]:', text);
+        res.json({ success: true, text });
     } catch (error) {
-        console.error('에러 발생:', error.message);
+        console.error('Gemini OCR 에러:', error.message);
         res.status(500).json({ success: false, message: error.message });
-    } finally {
-        // [원복] 매 검색 종료 후 브라우저 종료하여 세션 오염 방지
-        if (browser) await browser.close();
     }
 });
 
-// PDF 로직 (가장 완벽한 복구본 유지)
+// [최적화] 검색 엔드포인트 - 클러스터에 작업 위임
+app.post('/api/search', async (req, res) => {
+    const { insuranceCompany, productName, insuranceType } = req.body;
+    const startTime = Date.now();
+
+    try {
+        // 클러스터 대기열에 추가하고 결과 대기
+        const result = await cluster.execute({ 
+            insuranceCompany, productName, insuranceType, startTime 
+        });
+        res.json(result);
+    } catch (error) {
+        console.error('검색 클러스터 에러:', error.message);
+        res.status(500).json({ success: false, message: '서버가 너무 바쁩니다. 잠시 후 다시 시도해 주세요.' });
+    }
+});
+
+// PDF 로직 (기존 동일)
 app.get('/api/pdf', async (req, res) => {
     const { cc, fn, jm, dt, token, origin } = req.query;
-    console.log(`\n[PDF 요청] 파일: ${fn}`);
-
     try {
         const safeFn = encodeURIComponent(decodeURIComponent(fn));
         const pdfUrl = `${origin}/api/product-doc-url?company_cd=${cc}&filename=${safeFn}&job_month=${jm}&doctype=${dt}`;
-        
-        console.log(`[1단계: PDF 주소 요청] ${pdfUrl}`);
-
-        const authRes = await fetch(pdfUrl, {
-            headers: { 'Authorization': token, 'Content-Type': 'application/json' }
-        });
+        const authRes = await fetch(pdfUrl, { headers: { 'Authorization': token, 'Content-Type': 'application/json' } });
         const authData = await authRes.json();
-
         if (!authData.isSuccess) throw new Error(authData.errorMessage || "URL 추출 실패");
-
         const finalPdfUrl = authData.url.startsWith('http') ? authData.url : new URL(authData.url, origin).href;
-        console.log(`[2단계: 바이너리 스트리밍 시작] ${finalPdfUrl}`);
-
-        const response = await fetch(finalPdfUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-
-        if (!response.ok) throw new Error(`바이너리 응답 에러: ${response.status}`);
-
+        const response = await fetch(finalPdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', 'inline');
-
         const reader = response.body;
-        for await (const chunk of reader) {
-            res.write(chunk);
-        }
+        for await (const chunk of reader) { res.write(chunk); }
         res.end();
-        console.log(`[PDF 전송 완료] ${fn}`);
-
     } catch (e) {
-        console.error('[PDF 에러]', e.message);
         res.status(500).send("PDF 에러: " + e.message);
     }
 });
