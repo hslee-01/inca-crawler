@@ -26,29 +26,21 @@ async function initCluster() {
     const isLinux = process.platform === 'linux';
     const userDataPath = path.join(__dirname, 'user_data');
     
-    // 폴더가 없으면 생성
     if (!fs.existsSync(userDataPath)) {
         fs.mkdirSync(userDataPath, { recursive: true });
     }
 
     cluster = await Cluster.launch({
-        concurrency: Cluster.CONCURRENCY_BROWSER, // [변경] 더 안정적인 브라우저 단위 분리
-        maxConcurrency: 2, // VPS 사양에 맞춰 2개로 유지
+        concurrency: Cluster.CONCURRENCY_PAGE, // [핵심 변경] 하나의 브라우저 내에서 페이지(탭)만 공유하여 세션 유지 극대화
+        maxConcurrency: 2, // VPS 사양에 맞춰 동시 작업 2개로 제한 (업그레이드 시 4로 조정 가능)
         puppeteerOptions: {
             headless: true,
-            userDataDir: userDataPath, // [변경] 절대 경로 사용
+            userDataDir: userDataPath, // 세션 데이터 저장 폴더
             args: isLinux ? [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-gpu', 
-                '--no-first-run'
-            ] : [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox'
-            ]
+                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                '--disable-web-security', '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-gpu', '--no-first-run'
+            ] : ['--no-sandbox', '--disable-setuid-sandbox']
         },
         retryLimit: 1,
         timeout: 120000
@@ -63,31 +55,39 @@ async function initCluster() {
             console.log(`[상태] ${msg} (+${diff}s)`);
         };
 
-        // 이미지 차단 (속도 향상)
+        // 리소스 차단 (이미지, 폰트)
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['image', 'font'].includes(req.resourceType())) req.abort();
             else req.continue();
         });
 
-        // 1. 메인 페이지 접속 (로그인 여부 확인)
-        logTime('브라우저 실행 및 페이지 접속 중...');
+        // 1. 메인 페이지 접속 및 로그인 여부 확인
+        logTime('페이지 접속 중...');
         await page.goto('https://incar.ohmymanager.com/index.html', { 
             waitUntil: 'domcontentloaded',
             timeout: 60000 
         });
 
-        const isLoginPage = await page.$('#id');
-        if (isLoginPage) {
+        // 로그인 창이 있는지 확인
+        const loginIdInput = await page.$('#id');
+        if (loginIdInput) {
             logTime('로그인 필요 (신규 세션)');
             await page.evaluate(() => {
                 document.getElementById('id').value = '2334814';
                 document.getElementById('pw').value = '2334814';
                 document.getElementById('btnLogin').click();
             });
+            // 로그인 후 메뉴가 나타날 때까지 대기
             await page.waitForSelector('#menu0801', { timeout: 30000 });
         } else {
-            logTime('이미 로그인 됨 (세션 유지)');
+            logTime('이미 로그인 됨 (세션 유지 성공)');
+            // 혹시 메인 화면이 아니면 메인으로 이동 (강제)
+            const menuExists = await page.$('#menu0801');
+            if (!menuExists) {
+                await page.goto('https://incar.ohmymanager.com/index.html', { waitUntil: 'domcontentloaded' });
+                await page.waitForSelector('#menu0801', { timeout: 15000 });
+            }
         }
 
         // 2. 검색 페이지(팝업) 열기
@@ -137,7 +137,8 @@ async function initCluster() {
 
         // 4. 결과 리스트 대기 및 추출
         logTime('결과 데이터 로딩 중...');
-        await new Promise(r => setTimeout(r, 3000));
+        // 실제 데이터가 로딩될 때까지 지능형 대기
+        await new Promise(r => setTimeout(r, 2000));
         await searchPage.waitForFunction(() => {
             const rows = document.querySelectorAll('#tbl_display_proucts .table-row');
             return rows.length > 0 || document.body.innerText.includes('조회한 상품이 없습니다');
@@ -171,12 +172,12 @@ async function initCluster() {
         });
 
         logTime(`완료 (${results.length}건)`);
-        await searchPage.close();
+        await searchPage.close(); // 팝업 창만 닫음 (메인 탭은 재사용)
         
         return { success: true, results, token, origin };
     });
 
-    console.log('🚀 클러스터 관리 엔진 기동 완료 (안정성 모드)');
+    console.log('🚀 클러스터 관리 엔진 기동 완료 (세션 공유 모드)');
 }
 
 initCluster().catch(err => console.error('클러스터 기동 실패:', err));
@@ -207,7 +208,7 @@ app.post('/api/search', async (req, res) => {
         res.json(result);
     } catch (error) {
         console.error('검색 클러스터 에러:', error.message);
-        res.status(500).json({ success: false, message: '현재 요청이 너무 많습니다. 10초 후 다시 시도해 주세요.' });
+        res.status(500).json({ success: false, message: '현재 대기 인원이 많습니다. 잠시 후 다시 시도해 주세요.' });
     }
 });
 
