@@ -211,23 +211,51 @@ app.post('/api/search', async (req, res) => {
         res.status(500).json({ success: false, message: '현재 대기 인원이 많습니다. 잠시 후 다시 시도해 주세요.' });
     }
 });
-
+// PDF 로직
 app.get('/api/pdf', async (req, res) => {
     const { cc, fn, jm, dt, token, origin } = req.query;
+    console.log(`\n[PDF 요청] 파일: ${fn}`);
+
     try {
-        const safeFn = encodeURIComponent(decodeURIComponent(fn));
+        // Express가 이미 디코딩을 마친 상태이므로, 
+        // 외부 API로 보낼 때만 다시 인코딩해줍니다.
+        const safeFn = encodeURIComponent(fn);
+
         const pdfUrl = `${origin}/api/product-doc-url?company_cd=${cc}&filename=${safeFn}&job_month=${jm}&doctype=${dt}`;
-        const authRes = await fetch(pdfUrl, { headers: { 'Authorization': token, 'Content-Type': 'application/json' } });
+
+        console.log(`[PDF 단계 1] 주소 요청: ${pdfUrl}`);
+
+        const authRes = await fetch(pdfUrl, { 
+            headers: { 
+                'Authorization': token, 
+                'Content-Type': 'application/json' 
+            } 
+        });
         const authData = await authRes.json();
+
         if (!authData.isSuccess) throw new Error(authData.errorMessage || "URL 추출 실패");
+
         const finalPdfUrl = authData.url.startsWith('http') ? authData.url : new URL(authData.url, origin).href;
-        const response = await fetch(finalPdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        console.log(`[PDF 단계 2] 스트리밍 시작`);
+
+        const response = await fetch(finalPdfUrl, { 
+            headers: { 'User-Agent': 'Mozilla/5.0' } 
+        });
+
+        if (!response.ok) throw new Error(`바이너리 응답 에러: ${response.status}`);
+
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', 'inline');
+        
+        // 한글 파일명 대응을 위한 RFC 5987 인코딩 방식 적용
+        res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${safeFn}`);
+
         const reader = response.body;
-        for await (const chunk of reader) { res.write(chunk); }
+        for await (const chunk of reader) { 
+            res.write(chunk); 
+        }
         res.end();
     } catch (e) {
+        console.error('[PDF 에러]', e.message);
         res.status(500).send("PDF 에러: " + e.message);
     }
 });
