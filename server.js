@@ -77,30 +77,55 @@ app.post('/api/search', async (req, res) => {
     try {
         browser = await puppeteer.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'
+            ]
         });
         const page = await browser.newPage();
 
-        await page.goto('https://incar.ohmymanager.com/index.html', { waitUntil: 'networkidle2' });
+        // 페이지 접속 타임아웃 및 조건 완화
+        await page.goto('https://incar.ohmymanager.com/index.html', { 
+            waitUntil: 'domcontentloaded', 
+            timeout: 60000 
+        });
+
         await page.evaluate(() => {
             document.getElementById('id').value = '2334814';
             document.getElementById('pw').value = '2334814';
             document.getElementById('btnLogin').click();
         });
 
-        // 로그인 처리 대기 시간 증가 (4초 -> 6초)
-        await new Promise(r => setTimeout(r, 6000));
+        // 로그인 처리 대기 시간 증가
+        await new Promise(r => setTimeout(r, 8000));
 
         const pageTarget = page.target();
-        await page.evaluate(() => document.getElementById('menu0801')?.click());
+        
+        // 팝업 창을 더 확실하게 잡기 위한 프로미스 설정
+        const newPagePromise = new Promise(resolve => browser.once('targetcreated', target => resolve(target.page())));
+        
+        await page.evaluate(() => {
+            const menu = document.getElementById('menu0801');
+            if (menu) menu.click();
+            else console.error('메뉴 버튼을 찾을 수 없습니다.');
+        });
 
-        // 검색 페이지 팝업 대기 타임아웃 증가 (15초 -> 30초)
-        const newTarget = await browser.waitForTarget(target => 
-            target.opener() === pageTarget && target.url().includes('token='),
-            { timeout: 30000 }
-        );
-        searchPage = await newTarget.page();
-        await new Promise(r => setTimeout(r, 2000));
+        // 최대 60초 동안 팝업 창이 뜨기를 기다림
+        console.log('[상태] 팝업 창 로딩 대기 중...');
+        searchPage = await newPagePromise;
+        
+        if (!searchPage) throw new Error("팝업 창을 열지 못했습니다.");
+        
+        // 팝업 창 URL에 token이 포함될 때까지 대기
+        await searchPage.waitForFunction(() => window.location.href.includes('token='), { timeout: 60000 });
+        
+        console.log('[상태] 팝업 창 연결 성공');
+        await new Promise(r => setTimeout(r, 3000));
 
         const urlObj = new URL(searchPage.url());
         const token = urlObj.searchParams.get('token');
