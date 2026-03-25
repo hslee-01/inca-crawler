@@ -1,7 +1,9 @@
+import 'dotenv/config';
 import express from 'express';
 import puppeteer from 'puppeteer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,40 +11,74 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// sleep 헬퍼 함수
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Gemini 설정
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+
+// [디버그] 사용 가능한 모델 목록 확인 (404 에러 원인 파악용)
+async function listModels() {
+    try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
+        const data = await response.json();
+        console.log('--- [Gemini API 사용 가능 모델 목록] ---');
+        data.models?.forEach(m => console.log(`- ${m.name}`));
+        console.log('---------------------------------------');
+    } catch (e) {
+        console.error('모델 목록 확인 실패:', e.message);
+    }
+}
+listModels();
+
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
-let globalBrowser;
 let searchPage;
-let currentToken = "";
-let currentOrigin = "";
 
-async function initBrowser() {
-    if (!globalBrowser || !globalBrowser.connected) {
-        globalBrowser = await puppeteer.launch({
-            headless: true,
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage',
-                '--disable-gpu', // GPU 가속 끄기 (메모리 절약)
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process', // 프로세스 하나로 실행 (메모리 절약)
-                '--window-size=1280,800'
-            ]
-        });
+// Gemini OCR 엔드포인트
+app.post('/api/ocr', async (req, res) => {
+    try {
+        const { image } = req.body; // base64 data
+        if (!image) return res.status(400).json({ success: false, message: "이미지 데이터가 없습니다." });
+
+        const base64Data = image.split(',')[1] || image;
+        
+        const result = await model.generateContent([
+            "이미지에서 다음 정보를 추출하세요:\n" +
+            "1. 보험사명 (예: 삼성화재, 라이나생명, 메리츠화재 등)\n" +
+            "2. 상품명 (가장 크게 적힌 공식 이름)\n" +
+            "3. 계약일 (YYYY.MM.DD 형식, 날짜가 여러 개라면 가장 앞의 시작 날짜를 선택)\n\n" +
+            "결과는 오직 '보험사,상품명,날짜' 형식으로만 출력하세요. 못 찾으면 '미상'으로 하세요. 다른 설명은 하지 마세요.",
+            {
+                inlineData: {
+                    data: base64Data,
+                    mimeType: "image/jpeg"
+                }
+            }
+        ]);
+
+
+        const text = result.response.text().trim();
+        console.log('[Gemini OCR 결과]:', text);
+        res.json({ success: true, text });
+    } catch (error) {
+        console.error('Gemini OCR 에러:', error.message);
+        res.status(500).json({ success: false, message: error.message });
     }
-    return globalBrowser;
-}
+});
 
 app.post('/api/search', async (req, res) => {
     const { insuranceCompany, productName, insuranceType } = req.body;
-    console.log(`\n[검색] ${insuranceCompany} / ${productName}`);
+    console.log(`\n[검색 시작] ${insuranceCompany} / ${productName}`);
 
+    let browser;
     try {
-        const browser = await initBrowser();
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        });
         const page = await browser.newPage();
 
         await page.goto('https://incar.ohmymanager.com/index.html', { waitUntil: 'networkidle2' });
@@ -57,12 +93,16 @@ app.post('/api/search', async (req, res) => {
         const pageTarget = page.target();
         await page.evaluate(() => document.getElementById('menu0801')?.click());
 
-        const newTarget = await browser.waitForTarget(target => target.opener() === pageTarget);
+        const newTarget = await browser.waitForTarget(target => 
+            target.opener() === pageTarget && target.url().includes('token='),
+            { timeout: 15000 }
+        );
         searchPage = await newTarget.page();
-        
+        await new Promise(r => setTimeout(r, 1000));
+
         const urlObj = new URL(searchPage.url());
-        currentToken = urlObj.searchParams.get('token');
-        currentOrigin = urlObj.origin;
+        const token = urlObj.searchParams.get('token');
+        const origin = urlObj.origin;
 
         await searchPage.evaluate(async (company, pName, type) => {
             const typeSelect = document.getElementById('cbo_company_type');
@@ -90,55 +130,76 @@ app.post('/api/search', async (req, res) => {
 
         const allResults = await searchPage.evaluate(async () => {
             const results = [];
-            const pageButtons = Array.from(document.querySelectorAll('#pagination .num'));
-            const maxPage = pageButtons.length > 0 ? Math.max(...pageButtons.map(b => parseInt(b.innerText) || 1)) : 1;
-
-            for (let p = 1; p <= maxPage; p++) {
-                if (p > 1) {
-                    state.change_page(p);
-                    await new Promise(r => setTimeout(r, 2000));
+            const rows = Array.from(document.querySelectorAll('#tbl_display_proucts .table-row'));
+            rows.forEach((row) => {
+                const title = row.querySelector('.col-product-name')?.innerText.trim();
+                const date = row.querySelector('.col-sales-date')?.innerText.trim();
+                const getBtnInfo = (sel) => {
+                    const b = row.querySelector(sel + ' button');
+                    return b ? {
+                        cc: b.getAttribute('data-company-cd'),
+                        fn: b.getAttribute('data-filename'),
+                        jm: b.getAttribute('data-job-month'),
+                        dt: b.getAttribute('data-doctype')
+                    } : null;
+                };
+                if (title && !title.includes('조회한 상품이 없습니다')) {
+                    results.push({ title, date, terms: getBtnInfo('.col-doc-1'), business: getBtnInfo('.col-doc-2'), summary: getBtnInfo('.col-doc-3') });
                 }
-
-                const rows = Array.from(document.querySelectorAll('#tbl_display_proucts .table-row'));
-                rows.forEach((row) => {
-                    const title = row.querySelector('.col-product-name')?.innerText.trim();
-                    const date = row.querySelector('.col-sales-date')?.innerText.trim();
-                    const getBtnInfo = (sel) => {
-                        const b = row.querySelector(sel + ' button');
-                        return b ? {
-                            cc: b.getAttribute('data-company-cd'),
-                            fn: b.getAttribute('data-filename'),
-                            jm: b.getAttribute('data-job-month'),
-                            dt: b.getAttribute('data-doctype')
-                        } : null;
-                    };
-                    if (title) {
-                        results.push({ title, date, terms: getBtnInfo('.col-doc-1'), business: getBtnInfo('.col-doc-2'), summary: getBtnInfo('.col-doc-3') });
-                    }
-                });
-            }
+            });
             return results;
         });
 
-        await page.close();
-        res.json({ success: true, results: allResults });
+        res.json({ success: true, results: allResults, token, origin });
 
     } catch (error) {
-        console.error('Search Error:', error.message);
+        console.error('에러 발생:', error.message);
         res.status(500).json({ success: false, message: error.message });
+    } finally {
+        // [원복] 매 검색 종료 후 브라우저 종료하여 세션 오염 방지
+        if (browser) await browser.close();
     }
 });
 
+// PDF 로직 (가장 완벽한 복구본 유지)
 app.get('/api/pdf', async (req, res) => {
-    const { cc, fn, jm, dt } = req.query;
+    const { cc, fn, jm, dt, token, origin } = req.query;
+    console.log(`\n[PDF 요청] 파일: ${fn}`);
+
     try {
-        if (!currentToken || !currentOrigin) throw new Error("세션 만료");
-        const pdfUrl = `${currentOrigin}/common/pdf_viewer.php?token=${currentToken}&company_cd=${cc}&filename=${encodeURIComponent(fn)}&job_month=${jm}&doctype=${dt}`;
-        const pdfRes = await fetch(pdfUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const buffer = Buffer.from(await pdfRes.arrayBuffer());
+        const safeFn = encodeURIComponent(decodeURIComponent(fn));
+        const pdfUrl = `${origin}/api/product-doc-url?company_cd=${cc}&filename=${safeFn}&job_month=${jm}&doctype=${dt}`;
+        
+        console.log(`[1단계: PDF 주소 요청] ${pdfUrl}`);
+
+        const authRes = await fetch(pdfUrl, {
+            headers: { 'Authorization': token, 'Content-Type': 'application/json' }
+        });
+        const authData = await authRes.json();
+
+        if (!authData.isSuccess) throw new Error(authData.errorMessage || "URL 추출 실패");
+
+        const finalPdfUrl = authData.url.startsWith('http') ? authData.url : new URL(authData.url, origin).href;
+        console.log(`[2단계: 바이너리 스트리밍 시작] ${finalPdfUrl}`);
+
+        const response = await fetch(finalPdfUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+
+        if (!response.ok) throw new Error(`바이너리 응답 에러: ${response.status}`);
+
         res.setHeader('Content-Type', 'application/pdf');
-        res.send(buffer);
+        res.setHeader('Content-Disposition', 'inline');
+
+        const reader = response.body;
+        for await (const chunk of reader) {
+            res.write(chunk);
+        }
+        res.end();
+        console.log(`[PDF 전송 완료] ${fn}`);
+
     } catch (e) {
+        console.error('[PDF 에러]', e.message);
         res.status(500).send("PDF 에러: " + e.message);
     }
 });
