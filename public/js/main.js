@@ -154,10 +154,23 @@
             resultsDiv.innerHTML = '';
             
             let seconds = 0;
-            statusDiv.innerHTML = `🔍 서버에서 약관을 찾는 중... (${seconds}s)`;
+            const updateStatus = (s) => {
+                let msg = '🔍 서버에서 약관을 찾는 중...';
+                if (s < 3) msg = '🚀 브라우저 엔진 최적화 중...';
+                else if (s < 7) msg = '🌐 인카 금융 서비스 접속 중...';
+                else if (s < 12) msg = '🔐 보안 세션 확인 및 자동 로그인 중...';
+                else if (s < 18) msg = '📂 약관 검색 팝업 및 보안 토큰 대기 중...';
+                else if (s < 23) msg = '🔍 상품명 필터링 및 검색 수행 중...';
+                else if (s < 28) msg = '📊 결과 테이블 데이터 추출 중...';
+                else msg = '⏳ 응답 데이터를 정리하는 중...';
+                
+                statusDiv.innerHTML = `<div class="status-loader"></div> <b>${msg}</b> (${s}s)`;
+            };
+
+            updateStatus(0);
             const timer = setInterval(() => {
                 seconds++;
-                statusDiv.innerHTML = `🔍 서버에서 약관을 찾는 중... (${seconds}s)`;
+                updateStatus(seconds);
             }, 1000);
 
             // AbortController 생성

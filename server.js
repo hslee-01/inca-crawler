@@ -217,10 +217,9 @@ app.get('/api/pdf', async (req, res) => {
     console.log(`\n[PDF 요청] 파일: ${fn}`);
 
     try {
-        // Express가 이미 디코딩을 마친 상태이므로, 
-        // 외부 API로 보낼 때만 다시 인코딩해줍니다.
+        // [초안전 방식] Express가 이미 디코딩한 fn을 그대로 사용하되, 
+        // 외부 API 호출 시에만 안전하게 다시 인코딩합니다.
         const safeFn = encodeURIComponent(fn);
-
         const pdfUrl = `${origin}/api/product-doc-url?company_cd=${cc}&filename=${safeFn}&job_month=${jm}&doctype=${dt}`;
 
         console.log(`[PDF 단계 1] 주소 요청: ${pdfUrl}`);
@@ -244,10 +243,13 @@ app.get('/api/pdf', async (req, res) => {
 
         if (!response.ok) throw new Error(`바이너리 응답 에러: ${response.status}`);
 
+        // 브라우저 응답 헤더 설정
         res.setHeader('Content-Type', 'application/pdf');
         
-        // 한글 파일명 대응을 위한 RFC 5987 인코딩 방식 적용
-        res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${safeFn}`);
+        // [수정] 한글 파일명을 브라우저가 안전하게 인식하도록 RFC 5987 표준 적용
+        // fn 변수 자체는 이미 한글(디코딩된 상태)이므로 그대로 encodeURIComponent해서 보냅니다.
+        const headerFn = encodeURIComponent(fn);
+        res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${headerFn}`);
 
         const reader = response.body;
         for await (const chunk of reader) { 
