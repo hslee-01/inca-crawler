@@ -24,20 +24,34 @@ let cluster;
 // [대규모 접속 최적화] 클러스터 초기화 함수
 async function initCluster() {
     const isLinux = process.platform === 'linux';
+    const userDataPath = path.join(__dirname, 'user_data');
     
+    // 폴더가 없으면 생성
+    if (!fs.existsSync(userDataPath)) {
+        fs.mkdirSync(userDataPath, { recursive: true });
+    }
+
     cluster = await Cluster.launch({
-        concurrency: Cluster.CONCURRENCY_CONTEXT, // 컨텍스트 분리 (로그인 세션 공유 극대화)
-        maxConcurrency: 2, // VPS 사양(2~4GB)에 맞춰 동시 브라우저 2개로 제한 (서버 폭발 방지)
+        concurrency: Cluster.CONCURRENCY_BROWSER, // [변경] 더 안정적인 브라우저 단위 분리
+        maxConcurrency: 2, // VPS 사양에 맞춰 2개로 유지
         puppeteerOptions: {
             headless: true,
-            userDataDir: './user_data', // [핵심] 로그인 정보를 저장하여 재로그인 생략
+            userDataDir: userDataPath, // [변경] 절대 경로 사용
             args: isLinux ? [
-                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-                '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process'
-            ] : ['--no-sandbox', '--disable-setuid-sandbox']
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-gpu', 
+                '--no-first-run'
+            ] : [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox'
+            ]
         },
-        retryLimit: 1, // 에러 시 1회 재시도
-        timeout: 120000 // 전체 작업 타임아웃 2분
+        retryLimit: 1,
+        timeout: 120000
     });
 
     // 검색 작업 정의
@@ -58,7 +72,10 @@ async function initCluster() {
 
         // 1. 메인 페이지 접속 (로그인 여부 확인)
         logTime('브라우저 실행 및 페이지 접속 중...');
-        await page.goto('https://incar.ohmymanager.com/index.html', { waitUntil: 'domcontentloaded' });
+        await page.goto('https://incar.ohmymanager.com/index.html', { 
+            waitUntil: 'domcontentloaded',
+            timeout: 60000 
+        });
 
         const isLoginPage = await page.$('#id');
         if (isLoginPage) {
@@ -74,7 +91,7 @@ async function initCluster() {
         }
 
         // 2. 검색 페이지(팝업) 열기
-        logTime('검색 페이지 열기 중...');
+        logTime('메뉴 클릭 및 팝업 대기 중...');
         const [target] = await Promise.all([
             page.browser().waitForTarget(t => t.opener() === page.target(), { timeout: 60000 }),
             page.click('#menu0801')
@@ -83,7 +100,6 @@ async function initCluster() {
         const searchPage = await target.page();
         if (!searchPage) throw new Error("팝업 창을 열지 못했습니다.");
         
-        // 팝업에서도 이미지 차단
         await searchPage.setRequestInterception(true);
         searchPage.on('request', (req) => {
             if (['image', 'font'].includes(req.resourceType())) req.abort();
@@ -155,18 +171,16 @@ async function initCluster() {
         });
 
         logTime(`완료 (${results.length}건)`);
-        await searchPage.close(); // 팝업만 닫고 메인 창은 재사용을 위해 남겨둠 (컨텍스트가 닫히면 어차피 사라짐)
+        await searchPage.close();
         
         return { success: true, results, token, origin };
     });
 
-    console.log('🚀 클러스터 관리 엔진 기동 완료 (동시성 2)');
+    console.log('🚀 클러스터 관리 엔진 기동 완료 (안정성 모드)');
 }
 
-// 서버 시작 시 클러스터 초기화
 initCluster().catch(err => console.error('클러스터 기동 실패:', err));
 
-// Gemini OCR 엔드포인트 (기존 동일)
 app.post('/api/ocr', async (req, res) => {
     try {
         const { image } = req.body;
@@ -185,24 +199,18 @@ app.post('/api/ocr', async (req, res) => {
     }
 });
 
-// [최적화] 검색 엔드포인트 - 클러스터에 작업 위임
 app.post('/api/search', async (req, res) => {
     const { insuranceCompany, productName, insuranceType } = req.body;
     const startTime = Date.now();
-
     try {
-        // 클러스터 대기열에 추가하고 결과 대기
-        const result = await cluster.execute({ 
-            insuranceCompany, productName, insuranceType, startTime 
-        });
+        const result = await cluster.execute({ insuranceCompany, productName, insuranceType, startTime });
         res.json(result);
     } catch (error) {
         console.error('검색 클러스터 에러:', error.message);
-        res.status(500).json({ success: false, message: '서버가 너무 바쁩니다. 잠시 후 다시 시도해 주세요.' });
+        res.status(500).json({ success: false, message: '현재 요청이 너무 많습니다. 10초 후 다시 시도해 주세요.' });
     }
 });
 
-// PDF 로직 (기존 동일)
 app.get('/api/pdf', async (req, res) => {
     const { cc, fn, jm, dt, token, origin } = req.query;
     try {
