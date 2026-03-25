@@ -88,17 +88,19 @@ app.post('/api/search', async (req, res) => {
             document.getElementById('btnLogin').click();
         });
 
-        await new Promise(r => setTimeout(r, 4000));
+        // 로그인 처리 대기 시간 증가 (4초 -> 6초)
+        await new Promise(r => setTimeout(r, 6000));
 
         const pageTarget = page.target();
         await page.evaluate(() => document.getElementById('menu0801')?.click());
 
+        // 검색 페이지 팝업 대기 타임아웃 증가 (15초 -> 30초)
         const newTarget = await browser.waitForTarget(target => 
             target.opener() === pageTarget && target.url().includes('token='),
-            { timeout: 15000 }
+            { timeout: 30000 }
         );
         searchPage = await newTarget.page();
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 2000));
 
         const urlObj = new URL(searchPage.url());
         const token = urlObj.searchParams.get('token');
@@ -110,7 +112,7 @@ app.post('/api/search', async (req, res) => {
                 typeSelect.value = type || 'F';
                 typeSelect.dispatchEvent(new Event('change', { bubbles: true }));
             }
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 3000));
 
             const compSelect = document.getElementById('cbo_company');
             if (compSelect) {
@@ -120,13 +122,14 @@ app.post('/api/search', async (req, res) => {
                     compSelect.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             }
-            await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, 2000));
 
             document.getElementById('txt_product_name').value = pName;
             document.getElementById('btn_get_products').click();
         }, insuranceCompany, productName, insuranceType);
 
-        await new Promise(r => setTimeout(r, 4000));
+        // 결과 리스트 로딩 대기 시간 증가 (4초 -> 6초)
+        await new Promise(r => setTimeout(r, 6000));
 
         const allResults = await searchPage.evaluate(async () => {
             const results = [];
