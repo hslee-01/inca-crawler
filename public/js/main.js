@@ -39,9 +39,9 @@
             { keywords: ['에이스', 'ACE'], name: '에이스손해', type: 'F' }
         ];
 
-        imageInput.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+        // 공통 이미지 처리 함수
+        async function handleImage(file) {
+            if (!file || !file.type.startsWith('image/')) return;
 
             document.body.classList.add('loading');
             searchBtn.disabled = true;
@@ -128,8 +128,26 @@
                     clearInterval(ocrTimer);
                     document.body.classList.remove('loading');
                     searchBtn.disabled = false;
+                    URL.revokeObjectURL(img.src);
                 }
             };
+        }
+
+        // 파일 선택 이벤트
+        imageInput.addEventListener('change', (e) => {
+            handleImage(e.target.files[0]);
+        });
+
+        // 클립보드 붙여넣기 이벤트
+        window.addEventListener('paste', (e) => {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    handleImage(blob);
+                    break;
+                }
+            }
         });
 
         // 취소 버튼 클릭 이벤트
