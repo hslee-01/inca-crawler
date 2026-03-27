@@ -206,8 +206,6 @@
                 clearInterval(timer);
 
                 if (data.success && data.results.length > 0) {
-                    statusDiv.innerHTML = `🎯 <b>${data.results.length}건</b>의 약관을 매칭했습니다.`;
-                    
                     const { token, origin } = data;
                     const baseDateVal = dateInput.value.trim().replace(/\./g, '-');
                     const baseDate = baseDateVal ? new Date(baseDateVal) : null;
@@ -217,8 +215,9 @@
                         let minDiff = Infinity;
                         data.results.forEach((item, idx) => {
                             const salesDate = new Date(item.date.trim().replace(/\./g, '-'));
-                            if (!isNaN(salesDate) && salesDate >= baseDate) {
-                                const diff = salesDate.getTime() - baseDate.getTime();
+                            // 기준일자보다 과거이거나 같은 날짜 중에서 가장 가까운 것 찾기
+                            if (!isNaN(salesDate) && salesDate <= baseDate) {
+                                const diff = baseDate.getTime() - salesDate.getTime();
                                 if (diff < minDiff) {
                                     minDiff = diff;
                                     targetIdx = idx;
@@ -227,32 +226,42 @@
                         });
                     }
 
-                    resultsDiv.innerHTML = data.results.map((item, index) => {
-                        const isRecommend = (index === targetIdx);
-                        const recommendClass = isRecommend ? 'recommend' : '';
-                        const badge = isRecommend ? '<div class="tag tag-blue">BEST MATCH</div>' : '';
-                        
-                        const makeUrl = (d) => {
-                            if(!d) return '#';
-                            const params = new URLSearchParams({
-                                cc: d.cc, fn: d.fn, jm: d.jm, dt: d.dt, token: token, origin: origin
-                            });
-                            return `/api/pdf?${params.toString()}`;
-                        };
+                    // 최적 매칭 항목이 있는 경우, 해당 항목부터 끝까지 슬라이스
+                    if (targetIdx !== -1) {
+                        const filteredResults = data.results.slice(targetIdx);
+                        statusDiv.innerHTML = `🎯 기준일자 이전 약관 중 최적 매칭을 포함하여 <b>${filteredResults.length}건</b>을 찾았습니다.`;
 
-                        return `
-                            <div class="result-item ${recommendClass}">
-                                ${badge}
-                                <h3>${item.title}</h3>
-                                <p>📅 판매일: ${item.date}</p>
-                                <div class="docs">
-                                    <a href="${makeUrl(item.terms)}" target="_blank" class="doc-link highlight">약관보기</a>
-                                    <a href="${makeUrl(item.business)}" target="_blank" class="doc-link">방법서</a>
-                                    <a href="${makeUrl(item.summary)}" target="_blank" class="doc-link">요약서</a>
+                        resultsDiv.innerHTML = filteredResults.map((item, index) => {
+                            // 슬라이스된 리스트의 첫 번째 항목이 항상 최적 매칭 항목임
+                            const isRecommend = (index === 0);
+                            const recommendClass = isRecommend ? 'recommend' : '';
+                            const badge = isRecommend ? '<div class="tag tag-blue">최적 매칭 약관</div>' : '';
+                            
+                            const makeUrl = (d) => {
+                                if(!d) return '#';
+                                const params = new URLSearchParams({
+                                    cc: d.cc, fn: d.fn, jm: d.jm, dt: d.dt, token: token, origin: origin
+                                });
+                                return `/api/pdf?${params.toString()}`;
+                            };
+
+                            return `
+                                <div class="result-item ${recommendClass}">
+                                    ${badge}
+                                    <h3>${item.title}</h3>
+                                    <p>📅 판매일: ${item.date}</p>
+                                    <div class="docs">
+                                        <a href="${makeUrl(item.terms)}" target="_blank" class="doc-link highlight">약관보기</a>
+                                        <a href="${makeUrl(item.business)}" target="_blank" class="doc-link">방법서</a>
+                                        <a href="${makeUrl(item.summary)}" target="_blank" class="doc-link">요약서</a>
+                                    </div>
                                 </div>
-                            </div>
-                        `;
-                    }).join('');
+                            `;
+                        }).join('');
+                    } else {
+                        statusDiv.innerText = '기준일자 이전에 판매된 매칭 약관을 찾을 수 없습니다.';
+                        resultsDiv.innerHTML = '';
+                    }
                     
                     setTimeout(() => {
                         window.scrollTo({ top: statusDiv.offsetTop - 20, behavior: 'smooth' });
